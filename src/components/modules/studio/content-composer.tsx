@@ -155,21 +155,40 @@ export function ContentComposer() {
       return;
     }
 
+    if (!title.trim()) {
+      alert("Please enter a video title before scheduling.");
+      return;
+    }
+
     setIsSaving(true);
+    const tags = tagsInput.split(",").map((t) => t.trim()).filter(Boolean);
+
     try {
       const res = await fetch("/api/schedules", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          postId: `post_${Date.now()}`,
+          title: title.trim(),
+          description,
+          tags,
+          categoryId: category,
+          visibility,
           targetPublishTime: scheduleDate,
           displayTimezone: timezone,
+          driveFileId: stagedMedia?.driveFileId,
+          fileName: stagedMedia?.fileName,
+          fileSize: stagedMedia?.fileSize,
         }),
       });
 
       if (res.ok) {
         router.push("/calendar");
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error?.message || "Failed to schedule video.");
       }
+    } catch {
+      alert("An unexpected error occurred while scheduling.");
     } finally {
       setIsSaving(false);
     }
