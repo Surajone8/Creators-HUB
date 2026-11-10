@@ -12,6 +12,9 @@ export interface CreateScheduleRequest {
   fileName?: string;
   fileSize?: number;
   postId?: string;
+  autoPublish?: boolean;
+  autoDeleteMedia?: boolean;
+  notifyEmailTarget?: string;
 }
 
 export interface CalendarEventItem {
@@ -23,7 +26,7 @@ export interface CalendarEventItem {
   description?: string;
   tags?: string[];
   platform: "youtube";
-  status: ContentPostStatus;
+  status: ContentPostStatus | "completed";
   targetPublishTime: string; // ISO UTC
   displayTimezone: string;
   thumbnailUrl?: string;
@@ -31,8 +34,15 @@ export interface CalendarEventItem {
   driveFileId?: string | null;
   fileName?: string | null;
   fileSize?: number | null;
+  mediaCleanupStatus?: string | null;
+  mediaAssetId?: string | null;
   visibility: YouTubePrivacyStatus;
   youtubeVideoId?: string | null;
+  autoPublish: boolean;
+  autoDeleteMedia: boolean;
+  notifyEmailSent: boolean;
+  notifyEmailTarget?: string | null;
+  postPublishEmailSent?: boolean;
   createdAt: string;
 }
 

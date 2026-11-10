@@ -6,22 +6,35 @@ import { SocialMediaAccount } from "@/types/database";
 
 export async function GET(request: NextRequest) {
   try {
-    // 1. Check persistent cookie first
-    const cookie = request.cookies.get("yt_connected_account");
-    if (cookie?.value) {
+    const accounts: SocialMediaAccount[] = [];
+
+    // 1. Check persistent YouTube cookie
+    const ytCookie = request.cookies.get("yt_connected_account");
+    if (ytCookie?.value) {
       try {
-        const parsed = JSON.parse(cookie.value);
-        return NextResponse.json<ApiResponse<SocialMediaAccount[]>>({
-          success: true,
-          data: [parsed],
-          meta: { total: 1, timestamp: new Date().toISOString() },
-        });
+        const parsed = JSON.parse(ytCookie.value);
+        if (parsed.platform_code === "youtube") {
+          accounts.push(parsed);
+        }
       } catch {
         // Fall through
       }
     }
 
-    // 2. Check Supabase social_media_accounts
+    // 2. Check persistent Google Drive cookie
+    const driveCookie = request.cookies.get("drive_connected_account");
+    if (driveCookie?.value) {
+      try {
+        const parsed = JSON.parse(driveCookie.value);
+        if (parsed.platform_code === "google_drive") {
+          accounts.push(parsed);
+        }
+      } catch {
+        // Fall through
+      }
+    }
+
+    // 3. Check Supabase social_media_accounts
     const supabase = await createServerSupabaseClient();
     const {
       data: { user },
@@ -34,20 +47,28 @@ export async function GET(request: NextRequest) {
         .eq("user_id", user.id);
 
       if (dbAccounts && dbAccounts.length > 0) {
-        return NextResponse.json<ApiResponse<SocialMediaAccount[]>>({
-          success: true,
-          data: dbAccounts,
-          meta: { total: dbAccounts.length, timestamp: new Date().toISOString() },
-        });
+        for (const dbAcc of dbAccounts) {
+          if (!accounts.some((a) => a.platform_code === dbAcc.platform_code)) {
+            accounts.push(dbAcc);
+          }
+        }
       }
     }
 
-    // 3. Fallback to service layer
-    const accounts = await accountsService.getAccounts(user?.id || "demo-user");
+    if (accounts.length > 0) {
+      return NextResponse.json<ApiResponse<SocialMediaAccount[]>>({
+        success: true,
+        data: accounts,
+        meta: { total: accounts.length, timestamp: new Date().toISOString() },
+      });
+    }
+
+    // Fallback to service layer
+    const fallbackAccounts = await accountsService.getAccounts(user?.id || "demo-user");
     return NextResponse.json<ApiResponse<SocialMediaAccount[]>>({
       success: true,
-      data: accounts,
-      meta: { total: accounts.length, timestamp: new Date().toISOString() },
+      data: fallbackAccounts,
+      meta: { total: fallbackAccounts.length, timestamp: new Date().toISOString() },
     });
   } catch (err: unknown) {
     return NextResponse.json<ApiResponse>(

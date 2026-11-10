@@ -14,22 +14,28 @@ export class PublishingService {
     job,
     driveFileId,
     accessToken,
+    driveAccessToken,
     payload,
     fileSize = 10485760, // 10MB default
+    autoDeleteMedia = true,
   }: {
     job: PublishingJob;
     driveFileId: string;
     accessToken: string;
+    driveAccessToken?: string;
     payload: YouTubeUploadPayload;
     fileSize?: number;
+    autoDeleteMedia?: boolean;
   }): Promise<{ history: PublishingHistory; uploadResult: UploadResult }> {
     const started = new Date().toISOString();
 
     const uploadResult = await youtubeUploadService.uploadDriveFileToYouTube({
       accessToken,
+      driveAccessToken,
       driveFileId,
       payload,
       fileSize,
+      autoDeleteMedia,
     });
 
     if (uploadResult.success && uploadResult.youtubeVideoId) {

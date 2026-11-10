@@ -7,6 +7,7 @@ import { YouTubeIcon } from "@/components/ui/icons";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { toast } from "@/components/ui/toast";
 
 interface ChannelInfo {
   channelId: string;
@@ -71,6 +72,7 @@ function YouTubeChannelCardContent() {
     try {
       await fetch("/api/accounts/youtube/disconnect", { method: "POST" });
       setChannel(null);
+      toast.info("Account Disconnected", "YouTube account has been disconnected.");
     } finally {
       setDisconnecting(false);
     }

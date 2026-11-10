@@ -1,6 +1,8 @@
 import { SupabaseClient } from "@supabase/supabase-js";
 import { publishingService } from "@/services/publishing.service";
 import { youtubeApiClient } from "@/lib/youtube/client";
+import { driveStagingClient } from "@/lib/drive/client";
+import { emailNotificationService } from "@/services/email-notification.service";
 import { PublishingJob } from "@/types/database";
 
 export interface DispatchResultItem {
@@ -11,6 +13,9 @@ export interface DispatchResultItem {
   youtubeVideoId?: string;
   youtubeUrl?: string;
   driveFileDeleted?: boolean;
+  driveCleanupError?: string;
+  autoPublish?: boolean;
+  autoDeleteMedia?: boolean;
   error?: string;
 }
 
@@ -23,11 +28,13 @@ export class PublishingDispatcherService {
     scheduleId,
     accessToken,
     refreshToken,
+    driveAccessToken,
   }: {
     supabase: SupabaseClient;
     scheduleId: string;
     accessToken: string;
     refreshToken?: string | null;
+    driveAccessToken?: string | null;
   }): Promise<DispatchResultItem> {
     // 1. Fetch schedule and related post, platform, and media asset data
     const { data: schedule, error: schedErr } = await supabase
@@ -37,6 +44,10 @@ export class PublishingDispatcherService {
         target_publish_time,
         schedule_state,
         display_timezone,
+        auto_publish,
+        auto_delete_media,
+        notify_email_target,
+        notify_email_sent,
         post_id,
         post_platform_id,
         content_posts (
@@ -76,6 +87,8 @@ export class PublishingDispatcherService {
       throw new Error("No Google Drive staged media file found for this schedule.");
     }
 
+    const shouldAutoDeleteMedia = schedule.auto_delete_media !== false;
+
     // 2. Fetch or create publishing_job
     const { data: jobs } = await supabase
       .from("publishing_jobs")
@@ -114,7 +127,7 @@ export class PublishingDispatcherService {
       })
       .eq("id", job.id);
 
-    // 3. Check / Refresh token if needed
+    // 3. Check / Refresh YouTube token if needed
     let activeToken = accessToken;
     if (refreshToken) {
       try {
@@ -127,6 +140,38 @@ export class PublishingDispatcherService {
       }
     }
 
+    // 3b. Retrieve / Refresh Google Drive token if needed
+    let activeDriveToken = driveAccessToken || undefined;
+    if (!activeDriveToken) {
+      try {
+        const { data: driveAccs } = await supabase
+          .from("social_media_accounts")
+          .select("access_token, refresh_token, token_expires_at")
+          .eq("platform_code", "google_drive")
+          .limit(1);
+
+        if (driveAccs && driveAccs.length > 0) {
+          activeDriveToken = driveAccs[0].access_token;
+          if (driveAccs[0].refresh_token && driveAccs[0].token_expires_at) {
+            const expiresMs = new Date(driveAccs[0].token_expires_at).getTime();
+            if (expiresMs - Date.now() < 60000) {
+              const refreshedDrive = await driveStagingClient.refreshAccessToken(driveAccs[0].refresh_token);
+              activeDriveToken = refreshedDrive.access_token;
+              await supabase
+                .from("social_media_accounts")
+                .update({
+                  access_token: refreshedDrive.access_token,
+                  token_expires_at: new Date(Date.now() + refreshedDrive.expires_in * 1000).toISOString(),
+                })
+                .eq("platform_code", "google_drive");
+            }
+          }
+        }
+      } catch {
+        // Non-blocking fallback
+      }
+    }
+
     const payload = {
       title: platform.title || post.title,
       description: platform.description || "",
@@ -135,13 +180,15 @@ export class PublishingDispatcherService {
       privacyStatus: platform.visibility || "public",
     };
 
-    // 4. Execute the video upload pipeline
+    // 4. Execute the video upload pipeline (respects autoDeleteMedia flag)
     const { history, uploadResult } = await publishingService.processJob({
       job,
       driveFileId: media.google_drive_file_id,
       accessToken: activeToken,
+      driveAccessToken: activeDriveToken,
       payload,
       fileSize: media.file_size || 104857600,
+      autoDeleteMedia: shouldAutoDeleteMedia,
     });
 
     const now = new Date().toISOString();
@@ -174,6 +221,29 @@ export class PublishingDispatcherService {
         })
         .eq("id", schedule.post_platform_id);
 
+      // Safe Deletion DB Update:
+      // If autoDeleteMedia is false: retain in 'staged' for creator manual action
+      // If autoDeleteMedia is true: update to 'deleted' (or 'deletion_pending' if token was missing)
+      if (media?.id) {
+        if (!shouldAutoDeleteMedia) {
+          await supabase
+            .from("media_assets")
+            .update({
+              cleanup_status: "staged",
+              deleted_at: null,
+            })
+            .eq("id", media.id);
+        } else {
+          await supabase
+            .from("media_assets")
+            .update({
+              cleanup_status: uploadResult.driveFileDeleted ? "deleted" : "deletion_pending",
+              deleted_at: uploadResult.driveFileDeleted ? now : null,
+            })
+            .eq("id", media.id);
+        }
+      }
+
       // Record in publishing_history
       try {
         await supabase.from("publishing_history").insert({
@@ -190,6 +260,34 @@ export class PublishingDispatcherService {
         // History record optional
       }
 
+      // RULE: If BOTH options are selected (auto upload AND auto purge),
+      // send confirmation email AFTER the video is uploaded!
+      if (schedule.auto_publish !== false && shouldAutoDeleteMedia) {
+        try {
+          const userTargetEmail = schedule.notify_email_target || "reachsurajyadav@gmail.com";
+          await emailNotificationService.sendPostPublishConfirmationEmail(supabase, {
+            recipientEmail: userTargetEmail,
+            scheduleId: schedule.id,
+            videoTitle: payload.title,
+            youtubeVideoId: uploadResult.youtubeVideoId,
+            visibility: payload.privacyStatus,
+            fileName: media?.file_name || null,
+            driveFileDeleted: !!uploadResult.driveFileDeleted,
+            publishedAt: now,
+          });
+
+          await supabase
+            .from("content_schedules")
+            .update({
+              post_publish_email_sent: true,
+              updated_at: now,
+            })
+            .eq("id", scheduleId);
+        } catch (emailErr) {
+          console.error("Post-publish confirmation email non-blocking error:", emailErr);
+        }
+      }
+
       return {
         scheduleId,
         jobId: job.id,
@@ -198,6 +296,9 @@ export class PublishingDispatcherService {
         youtubeVideoId: uploadResult.youtubeVideoId,
         youtubeUrl: uploadResult.youtubeUrl,
         driveFileDeleted: uploadResult.driveFileDeleted,
+        driveCleanupError: uploadResult.driveCleanupError,
+        autoPublish: schedule.auto_publish !== false,
+        autoDeleteMedia: shouldAutoDeleteMedia,
       };
     } else {
       // Handle failure
@@ -230,21 +331,30 @@ export class PublishingDispatcherService {
   }
 
   /**
-   * Finds all enqueued jobs whose scheduled publish time <= now
+   * Finds all scheduled jobs whose scheduled publish time <= now.
+   * If onlyAutoPublish is true, filters out schedules where auto_publish === false.
    */
-  async findDueSchedules(supabase: SupabaseClient) {
+  async findDueSchedules(supabase: SupabaseClient, onlyAutoPublish: boolean = false) {
     const nowIso = new Date().toISOString();
 
-    const { data, error } = await supabase
+    let query = supabase
       .from("content_schedules")
       .select(`
         id,
         target_publish_time,
         schedule_state,
-        post_id
+        post_id,
+        auto_publish,
+        auto_delete_media
       `)
       .eq("schedule_state", "scheduled")
       .lte("target_publish_time", nowIso);
+
+    if (onlyAutoPublish) {
+      query = query.neq("auto_publish", false);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       throw new Error(`Failed to query due schedules: ${error.message}`);

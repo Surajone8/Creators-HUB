@@ -25,7 +25,10 @@ export async function PATCH(
     }
 
     const supabase = await createServerSupabaseClient();
-    await scheduleService.reschedule(supabase, id, body.targetPublishTime, body.displayTimezone);
+    await scheduleService.reschedule(supabase, id, body.targetPublishTime, body.displayTimezone, {
+      autoPublish: body.autoPublish,
+      autoDeleteMedia: body.autoDeleteMedia,
+    });
 
     return NextResponse.json<ApiResponse>({
       success: true,

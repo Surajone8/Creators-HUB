@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
+import { toast } from "@/components/ui/toast";
 import { GeneratedMetadataResult } from "@/types/ai";
 
 interface AIMetadataAssistantProps {
@@ -52,7 +53,9 @@ export function AIMetadataAssistant({ onApply }: AIMetadataAssistantProps) {
         setSelectedTitle(data.data.candidateTitles[0]);
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Error connecting to local Ollama runtime");
+      const msg = err instanceof Error ? err.message : "Error connecting to local Ollama runtime";
+      setError(msg);
+      toast.error("Ollama AI Error", msg);
     } finally {
       setLoading(false);
     }
@@ -65,6 +68,7 @@ export function AIMetadataAssistant({ onApply }: AIMetadataAssistantProps) {
       description: result.description,
       tags: result.tags,
     });
+    toast.success("AI Metadata Applied", "Loaded generated title, description, and tags into composer.");
   }
 
   return (

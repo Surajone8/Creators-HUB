@@ -65,6 +65,9 @@ export async function POST(req: NextRequest) {
       fileName: body.fileName,
       fileSize: body.fileSize,
       postId: body.postId,
+      autoPublish: body.autoPublish !== false,
+      autoDeleteMedia: body.autoDeleteMedia !== false,
+      notifyEmailTarget: body.notifyEmailTarget || user?.email || "reachsurajyadav@gmail.com",
     });
 
     return NextResponse.json<ApiResponse>(

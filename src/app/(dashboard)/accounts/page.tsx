@@ -1,4 +1,5 @@
 import { YouTubeChannelCard } from "@/components/modules/accounts/youtube-channel-card";
+import { DriveAccountCard } from "@/components/modules/accounts/drive-account-card";
 
 export default function AccountsPage() {
   return (
@@ -6,11 +7,13 @@ export default function AccountsPage() {
       <div>
         <h2 className="text-xl font-bold tracking-tight text-zinc-100">Connected Accounts</h2>
         <p className="text-xs text-zinc-400">
-          Manage Google OAuth, YouTube channel authorization, and token lifecycle (Phase 1: YouTube only)
+          Manage Google OAuth, YouTube channel publishing, and Google Drive temporary media staging (Section 5.1 & 7)
         </p>
       </div>
 
       <YouTubeChannelCard />
+
+      <DriveAccountCard />
     </div>
   );
 }

@@ -17,6 +17,9 @@ import {
   CalendarCheck,
   CalendarX,
   Send,
+  Trash2,
+  Mail,
+  Zap,
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -35,6 +38,8 @@ import {
 import { YouTubeIcon } from "@/components/ui/icons";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { DateTimePicker } from "@/components/ui/date-time-picker";
+import { toast } from "@/components/ui/toast";
 import { formatDate } from "@/lib/utils/formatters";
 import { CalendarEventItem } from "@/types/schedule";
 
@@ -55,6 +60,8 @@ export function CalendarGrid() {
   // Reschedule Modal State
   const [rescheduleEvent, setRescheduleEvent] = useState<CalendarEventItem | null>(null);
   const [newScheduleDate, setNewScheduleDate] = useState("");
+  const [rescheduleAutoPublish, setRescheduleAutoPublish] = useState(true);
+  const [rescheduleAutoDeleteMedia, setRescheduleAutoDeleteMedia] = useState(true);
   const [isRescheduling, setIsRescheduling] = useState(false);
 
   // Cancel Schedule State
@@ -62,6 +69,9 @@ export function CalendarGrid() {
 
   // Immediate Publish State
   const [isPublishingNow, setIsPublishingNow] = useState<string | null>(null);
+
+  // Drive Cleanup State
+  const [isCleaningDrive, setIsCleaningDrive] = useState<string | null>(null);
 
   const fetchSchedules = useCallback(async () => {
     setIsLoading(true);
@@ -87,28 +97,54 @@ export function CalendarGrid() {
     fetchSchedules();
   }, [fetchSchedules]);
 
-  // Automated background dispatcher polling every 30 seconds
+  // Listen to Global Publishing Heartbeat schedule updates
+  useEffect(() => {
+    function handleGlobalUpdate() {
+      fetchSchedules();
+    }
+    window.addEventListener("creator-hub-schedules-updated", handleGlobalUpdate);
+    return () => {
+      window.removeEventListener("creator-hub-schedules-updated", handleGlobalUpdate);
+    };
+  }, [fetchSchedules]);
+
+  // High-precision automated background dispatcher polling (every 5 seconds)
   useEffect(() => {
     const interval = setInterval(async () => {
       const now = new Date();
-      const hasDue = events.some(
+      // Check 1: Has item due for publishing (targetPublishTime <= now)
+      const hasDueForPublish = events.some(
         (e) => e.status === "scheduled" && new Date(e.targetPublishTime) <= now
       );
-      if (hasDue) {
+      // Check 2: Has item due for 2-minute advance email alert (targetPublishTime <= now + 2m15s, !notifyEmailSent, and requires manual action)
+      const hasDueForEmail = events.some(
+        (e) =>
+          e.status === "scheduled" &&
+          (!e.autoPublish || !e.autoDeleteMedia) &&
+          !e.notifyEmailSent &&
+          new Date(e.targetPublishTime).getTime() <= now.getTime() + 135000
+      );
+
+      if (hasDueForPublish || hasDueForEmail) {
         try {
           const res = await fetch("/api/publishing/dispatch", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
           });
           const json = await res.json();
-          if (json.success && json.data?.totalProcessed > 0) {
+          if (
+            json.success &&
+            ((json.data?.totalProcessed && json.data.totalProcessed > 0) ||
+              (json.data?.advanceReminderEmailsDispatched &&
+                json.data.advanceReminderEmailsDispatched > 0))
+          ) {
             fetchSchedules();
           }
         } catch {
           // Retry next tick
         }
       }
-    }, 30000);
+    }, 5000);
 
     return () => clearInterval(interval);
   }, [events, fetchSchedules]);
@@ -164,12 +200,13 @@ export function CalendarGrid() {
         throw new Error(outcome.error || "Publishing job failed.");
       }
 
+      toast.success("Publish Initiated", "Video publishing process dispatched to YouTube.");
       await fetchSchedules();
       if (inspectEvent?.id === scheduleId) {
         setInspectEvent(null);
       }
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : "Publish request failed.");
+      toast.error("Publish Failed", err instanceof Error ? err.message : "Publish request failed.");
     } finally {
       setIsPublishingNow(null);
     }
@@ -187,6 +224,8 @@ export function CalendarGrid() {
         body: JSON.stringify({
           targetPublishTime: newScheduleDate,
           displayTimezone: rescheduleEvent.displayTimezone,
+          autoPublish: rescheduleAutoPublish,
+          autoDeleteMedia: rescheduleAutoDeleteMedia,
         }),
       });
 
@@ -195,11 +234,12 @@ export function CalendarGrid() {
         throw new Error(json.error?.message || "Failed to update schedule date.");
       }
 
+      toast.success("Schedule Updated", `"${rescheduleEvent.title}" rescheduled successfully!`);
       setRescheduleEvent(null);
       setNewScheduleDate("");
       await fetchSchedules();
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : "Reschedule failed.");
+      toast.error("Reschedule Failed", err instanceof Error ? err.message : "Reschedule failed.");
     } finally {
       setIsRescheduling(false);
     }
@@ -222,18 +262,59 @@ export function CalendarGrid() {
         throw new Error(json.error?.message || "Failed to cancel schedule.");
       }
 
+      toast.info("Schedule Cancelled", "The scheduled release was cancelled.");
       await fetchSchedules();
       if (inspectEvent?.id === id) {
         setInspectEvent(null);
       }
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : "Cancel request failed.");
+      toast.error("Cancel Failed", err instanceof Error ? err.message : "Cancel request failed.");
     } finally {
       setIsCancelling(null);
     }
   }
 
-  function getStatusConfig(status: string, isDue?: boolean) {
+  // Handle Manual Clean Staged Drive File
+  async function handleCleanStagedDriveFile(item: CalendarEventItem) {
+    if (!item.driveFileId) return;
+    if (!confirm(`Are you sure you want to purge "${item.fileName || item.driveFileId}" from Google Drive? This will clear temporary staged video bytes.`)) {
+      return;
+    }
+
+    setIsCleaningDrive(item.id);
+    try {
+      const res = await fetch("/api/media/delete-staged", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          driveFileId: item.driveFileId,
+          mediaAssetId: item.mediaAssetId,
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        toast.success("Drive Cleaned", "Temporary staged video successfully cleaned up from Google Drive!");
+        await fetchSchedules();
+        if (inspectEvent?.id === item.id) {
+          setInspectEvent((prev) => (prev ? { ...prev, mediaCleanupStatus: "deleted" } : null));
+        }
+      } else {
+        if (data.data?.activationUrl) {
+          window.open(data.data.activationUrl, "_blank");
+          toast.warning("Google Drive API Disabled", "An activation page has been opened in a new tab. Please click 'Enable' then retry.");
+        } else {
+          toast.error("Drive Cleanup Failed", data.error?.message || "Failed to purge file from Google Drive. Please ensure your Google Drive is connected under Connected Accounts.");
+        }
+      }
+    } catch {
+      toast.error("Network Error", "Network request failed while attempting Drive cleanup.");
+    } finally {
+      setIsCleaningDrive(null);
+    }
+  }
+
+  function getStatusConfig(status: string, isDue?: boolean, autoPublish?: boolean) {
     const normalized = (status || "").toLowerCase();
 
     if (normalized === "published" || normalized === "completed") {
@@ -249,19 +330,19 @@ export function CalendarGrid() {
     if (normalized === "scheduled") {
       if (isDue) {
         return {
-          label: "DUE FOR PUBLISH",
+          label: autoPublish === false ? "DUE (AWAITING CLICK)" : "DUE FOR PUBLISH",
           badgeVariant: "warning" as const,
           chipStyle: "bg-amber-950/90 text-amber-200 border-amber-800/80 animate-pulse hover:bg-amber-900/80",
           dotColor: "bg-amber-400",
-          description: "Scheduled time reached; ready to dispatch",
+          description: autoPublish === false ? "Scheduled time reached; awaiting creator click" : "Scheduled time reached; dispatching upload",
         };
       }
       return {
-        label: "SCHEDULED",
+        label: autoPublish === false ? "SCHEDULED (MANUAL)" : "SCHEDULED (AUTO)",
         badgeVariant: "info" as const,
         chipStyle: "bg-blue-950/80 text-blue-300 border-blue-800/60 hover:bg-blue-900/60",
         dotColor: "bg-blue-400",
-        description: "Queued for automated future release",
+        description: autoPublish === false ? "Queued; waiting for creator trigger at target time" : "Queued for automated future release",
       };
     }
 
@@ -534,7 +615,7 @@ export function CalendarGrid() {
                         ev.status === "scheduled" &&
                         todayDate !== null &&
                         new Date(ev.targetPublishTime).getTime() <= new Date().getTime();
-                      const config = getStatusConfig(ev.status, !!evIsDue);
+                      const config = getStatusConfig(ev.status, !!evIsDue, ev.autoPublish);
 
                       return (
                         <div
@@ -620,28 +701,50 @@ export function CalendarGrid() {
               todayDate !== null &&
               new Date(item.targetPublishTime).getTime() <= new Date().getTime();
 
-            const config = getStatusConfig(item.status, !!isDue);
+            const config = getStatusConfig(item.status, !!isDue, item.autoPublish);
 
-                    return (
-                      <div
-                        key={item.id}
-                        className={`rounded-2xl border p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 transition-colors shadow-sm ${
-                          isDue
-                            ? "border-amber-800/80 bg-amber-950/15"
-                            : "border-zinc-800 bg-zinc-900/60 hover:border-zinc-700"
-                        }`}
-                      >
-                        <div className="flex items-start gap-3">
-                          <div className="p-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-red-500 mt-0.5 shrink-0 shadow-inner">
-                            <YouTubeIcon className="h-5 w-5" />
-                          </div>
-                          <div>
-                            <div className="flex flex-wrap items-center gap-2 mb-1">
-                              <h4 className="text-sm font-semibold text-zinc-100">{item.title}</h4>
-                              <Badge variant={config.badgeVariant}>{config.label}</Badge>
-                              <span className="text-[10px] text-zinc-400 uppercase px-2 py-0.5 rounded bg-zinc-800/80 font-mono">
-                                {item.visibility}
-                              </span>
+            return (
+              <div
+                key={item.id}
+                className={`rounded-2xl border p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 transition-colors shadow-sm ${
+                  isDue
+                    ? "border-amber-800/80 bg-amber-950/15"
+                    : "border-zinc-800 bg-zinc-900/60 hover:border-zinc-700"
+                }`}
+              >
+                <div className="flex items-start gap-3">
+                  <div className="p-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-red-500 mt-0.5 shrink-0 shadow-inner">
+                    <YouTubeIcon className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2 mb-1">
+                      <h4 className="text-sm font-semibold text-zinc-100">{item.title}</h4>
+                      <Badge variant={config.badgeVariant}>{config.label}</Badge>
+                      <span className="text-[10px] text-zinc-400 uppercase px-2 py-0.5 rounded bg-zinc-800/80 font-mono">
+                        {item.visibility}
+                      </span>
+
+                      {/* Automation Options Badges */}
+                      {item.autoPublish ? (
+                        <span className="text-[10px] text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-1.5 py-0.5 rounded flex items-center gap-1 font-medium">
+                          <Zap className="h-2.5 w-2.5" /> Auto-Publish
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-amber-400 bg-amber-950/60 border border-amber-800/60 px-1.5 py-0.5 rounded font-medium">
+                          Manual Publish
+                        </span>
+                      )}
+
+                      {item.autoDeleteMedia ? (
+                        <span className="text-[10px] text-zinc-400 bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 rounded">
+                          Auto-Cleanup
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-sky-400 bg-sky-950/60 border border-sky-800/60 px-1.5 py-0.5 rounded font-medium">
+                          Manual Drive Cleanup
+                        </span>
+                      )}
+
                       {item.youtubeVideoId && (
                         <a
                           href={`https://youtu.be/${item.youtubeVideoId}`}
@@ -664,11 +767,53 @@ export function CalendarGrid() {
                         </span>
                       </span>
 
-                      {item.hasMedia ? (
-                        <span className="flex items-center gap-1 text-emerald-400">
-                          <HardDrive className="h-3.5 w-3.5" />
-                          Drive Staged ({item.fileName || "video.mp4"})
+                      {/* Email Alert Indicator */}
+                      {item.status === "scheduled" && (
+                        <span className="flex items-center gap-1 text-[11px]">
+                          <Mail className="h-3 w-3 text-amber-400" />
+                          <span
+                            className={
+                              item.autoPublish && item.autoDeleteMedia
+                                ? "text-emerald-400"
+                                : item.notifyEmailSent
+                                ? "text-emerald-400"
+                                : "text-amber-300"
+                            }
+                          >
+                            {item.autoPublish && item.autoDeleteMedia
+                              ? "Post-Upload Email Armed"
+                              : item.notifyEmailSent
+                              ? "2m Alert Sent"
+                              : "2m Alert Armed"}
+                          </span>
                         </span>
+                      )}
+                      {(item.status === "completed" || item.status === "published") && (
+                        <span className="flex items-center gap-1 text-[11px]">
+                          <Mail className="h-3 w-3 text-emerald-400" />
+                          <span className={item.postPublishEmailSent ? "text-emerald-400" : "text-zinc-500"}>
+                            {item.postPublishEmailSent ? "Receipt Emailed" : "Direct Release"}
+                          </span>
+                        </span>
+                      )}
+
+                      {item.hasMedia ? (
+                        item.mediaCleanupStatus === "deleted" ? (
+                          <span className="flex items-center gap-1 text-zinc-500 line-through">
+                            <HardDrive className="h-3.5 w-3.5 text-zinc-600" />
+                            Drive Cleaned ({item.fileName || "video.mp4"})
+                          </span>
+                        ) : (item.status === "completed" || item.status === "published") ? (
+                          <span className="flex items-center gap-1 text-amber-400">
+                            <HardDrive className="h-3.5 w-3.5 text-amber-400" />
+                            Drive Staged ({item.fileName || "video.mp4"}) • Pending Cleanup
+                          </span>
+                        ) : (
+                          <span className="flex items-center gap-1 text-emerald-400">
+                            <HardDrive className="h-3.5 w-3.5" />
+                            Drive Staged ({item.fileName || "video.mp4"})
+                          </span>
+                        )
                       ) : (
                         <span className="text-zinc-500">No media staged</span>
                       )}
@@ -678,6 +823,19 @@ export function CalendarGrid() {
 
                 {/* Action Buttons */}
                 <div className="flex items-center gap-2 self-end md:self-auto shrink-0">
+                  {(item.status === "completed" || item.status === "published") && item.hasMedia && item.mediaCleanupStatus !== "deleted" && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleCleanStagedDriveFile(item)}
+                      isLoading={isCleaningDrive === item.id}
+                      className="text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-950/40 border-rose-900/50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5 mr-1" />
+                      Clean Drive File
+                    </Button>
+                  )}
+
                   {item.status === "scheduled" && (
                     <>
                       {isDue && (
@@ -698,6 +856,8 @@ export function CalendarGrid() {
                         onClick={() => {
                           setRescheduleEvent(item);
                           setNewScheduleDate(item.targetPublishTime.slice(0, 16));
+                          setRescheduleAutoPublish(item.autoPublish !== false);
+                          setRescheduleAutoDeleteMedia(item.autoDeleteMedia !== false);
                         }}
                         className="text-xs"
                       >
@@ -797,13 +957,94 @@ export function CalendarGrid() {
                   <span className="text-zinc-500 block mb-0.5">Google Drive Media</span>
                   <span className="font-medium text-zinc-200">
                     {inspectEvent.driveFileId ? (
-                      <span className="text-emerald-400 font-mono text-[11px] truncate block" title={inspectEvent.driveFileId}>
-                        {inspectEvent.fileName || inspectEvent.driveFileId}
-                      </span>
+                      <div className="space-y-0.5">
+                        <span
+                          className={`font-mono text-[11px] truncate block ${
+                            inspectEvent.mediaCleanupStatus === "deleted"
+                              ? "line-through text-zinc-500"
+                              : "text-emerald-400"
+                          }`}
+                          title={inspectEvent.driveFileId}
+                        >
+                          {inspectEvent.fileName || inspectEvent.driveFileId}
+                        </span>
+                        <span className="text-[10px] text-zinc-400 block">
+                          Cleanup Status:{" "}
+                          <strong
+                            className={
+                              inspectEvent.mediaCleanupStatus === "deleted"
+                                ? "text-zinc-400"
+                                : "text-amber-400"
+                            }
+                          >
+                            {inspectEvent.mediaCleanupStatus === "deleted"
+                              ? "SAFELY DELETED"
+                              : "PENDING PURGE"}
+                          </strong>
+                        </span>
+                      </div>
                     ) : (
                       "None"
                     )}
                   </span>
+                </div>
+
+                {/* Automation Rules in Inspect Modal */}
+                <div className="col-span-2 pt-2 border-t border-zinc-800/80 grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <span className="text-zinc-500 block mb-0.5">Auto-Publish Rule</span>
+                    <span className="font-medium text-zinc-200">
+                      {inspectEvent.autoPublish ? (
+                        <span className="text-emerald-400 font-semibold flex items-center gap-1">
+                          <Zap className="h-3 w-3" /> Auto-Publish Active
+                        </span>
+                      ) : (
+                        <span className="text-amber-400 font-semibold">
+                          ⚠️ Manual Publish Required
+                        </span>
+                      )}
+                    </span>
+                  </div>
+
+                  <div>
+                    <span className="text-zinc-500 block mb-0.5">Google Drive Cleanup Rule</span>
+                    <span className="font-medium text-zinc-200">
+                      {inspectEvent.autoDeleteMedia ? (
+                        <span className="text-emerald-400 font-semibold flex items-center gap-1">
+                          <Trash2 className="h-3 w-3" /> Auto-Purge Post-Upload
+                        </span>
+                      ) : (
+                        <span className="text-sky-300 font-semibold">
+                          Manual Drive Cleanup Required
+                        </span>
+                      )}
+                    </span>
+                  </div>
+
+                  <div className="col-span-2 p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs flex items-center justify-between">
+                    <span className="text-zinc-400 flex items-center gap-1.5 text-[11px]">
+                      <Mail className="h-3.5 w-3.5 text-amber-400" />
+                      {inspectEvent.autoPublish && inspectEvent.autoDeleteMedia
+                        ? "Post-Upload Confirmation Receipt:"
+                        : "2-Minute Advance Action Required Alert:"}
+                    </span>
+                    <span
+                      className={`text-[11px] font-medium ${
+                        (inspectEvent.autoPublish && inspectEvent.autoDeleteMedia && inspectEvent.postPublishEmailSent) ||
+                        ((!inspectEvent.autoPublish || !inspectEvent.autoDeleteMedia) && inspectEvent.notifyEmailSent)
+                          ? "text-emerald-400"
+                          : "text-amber-300"
+                      }`}
+                    >
+                      {inspectEvent.autoPublish && inspectEvent.autoDeleteMedia
+                        ? inspectEvent.postPublishEmailSent
+                          ? `Delivered to ${inspectEvent.notifyEmailTarget || "Creator"}`
+                          : `Armed (Will send after upload to ${inspectEvent.notifyEmailTarget || "Creator"})`
+                        : inspectEvent.notifyEmailSent
+                        ? `Dispatched to ${inspectEvent.notifyEmailTarget || "Creator"}`
+                        : `Armed (Will send 2m prior to ${inspectEvent.notifyEmailTarget || "Creator"})`}
+                    </span>
+                  </div>
                 </div>
               </div>
 
@@ -823,6 +1064,20 @@ export function CalendarGrid() {
             </div>
 
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
+              {(inspectEvent.status === "completed" || inspectEvent.status === "published") &&
+                inspectEvent.hasMedia &&
+                inspectEvent.mediaCleanupStatus !== "deleted" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleCleanStagedDriveFile(inspectEvent)}
+                    isLoading={isCleaningDrive === inspectEvent.id}
+                    className="text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-950/40 border-rose-900/50"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 mr-1" />
+                    Clean Staged Drive File
+                  </Button>
+                )}
               {inspectEvent.status === "scheduled" && (
                 <Button
                   variant="outline"
@@ -830,6 +1085,8 @@ export function CalendarGrid() {
                   onClick={() => {
                     setRescheduleEvent(inspectEvent);
                     setNewScheduleDate(inspectEvent.targetPublishTime.slice(0, 16));
+                    setRescheduleAutoPublish(inspectEvent.autoPublish !== false);
+                    setRescheduleAutoDeleteMedia(inspectEvent.autoDeleteMedia !== false);
                     setInspectEvent(null);
                   }}
                   className="text-xs"
@@ -865,12 +1122,34 @@ export function CalendarGrid() {
 
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-zinc-300">New Target Publish Time</label>
-              <input
-                type="datetime-local"
+              <DateTimePicker
                 value={newScheduleDate}
-                onChange={(e) => setNewScheduleDate(e.target.value)}
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-red-500"
+                onChange={setNewScheduleDate}
+                timezone={rescheduleEvent.displayTimezone}
+                placeholder="Pick new release date & time..."
               />
+            </div>
+
+            <div className="space-y-2 pt-2 border-t border-zinc-800">
+              <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={rescheduleAutoPublish}
+                  onChange={(e) => setRescheduleAutoPublish(e.target.checked)}
+                  className="rounded border-zinc-700 bg-zinc-900 text-red-600 focus:ring-red-500"
+                />
+                <span>Directly publish & upload at scheduled time</span>
+              </label>
+
+              <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={rescheduleAutoDeleteMedia}
+                  onChange={(e) => setRescheduleAutoDeleteMedia(e.target.checked)}
+                  className="rounded border-zinc-700 bg-zinc-900 text-red-600 focus:ring-red-500"
+                />
+                <span>Directly delete staged media from Drive post-upload</span>
+              </label>
             </div>
 
             <div className="flex items-center justify-end gap-2 pt-2">

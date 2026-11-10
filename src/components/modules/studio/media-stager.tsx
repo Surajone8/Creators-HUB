@@ -4,6 +4,7 @@ import { useState } from "react";
 import { HardDrive, CheckCircle2, ShieldCheck, Link2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { toast } from "@/components/ui/toast";
 import { formatBytes } from "@/lib/utils/formatters";
 
 interface MediaStagerProps {
@@ -44,6 +45,7 @@ export function MediaStager({ onMediaStaged }: MediaStagerProps) {
       fileSize: size,
     });
     setStaged(true);
+    toast.success("Drive Media Linked", `"${fileName}" linked for ephemeral upload staging.`);
   }
 
   return (

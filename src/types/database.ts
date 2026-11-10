@@ -128,6 +128,11 @@ export interface ContentSchedule {
   target_publish_time: string; // ISO 8601 UTC
   display_timezone: string;
   schedule_state: ContentPostStatus;
+  auto_publish: boolean;
+  auto_delete_media: boolean;
+  notify_email_sent: boolean;
+  notify_email_target: string | null;
+  post_publish_email_sent?: boolean;
   created_at: string;
   updated_at: string;
 }

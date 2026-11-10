@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
   Save,
@@ -11,15 +11,21 @@ import {
   ExternalLink,
   ShieldCheck,
   AlertTriangle,
+  Mail,
+  Zap,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
+import { DateTimePicker } from "@/components/ui/date-time-picker";
+import { toast } from "@/components/ui/toast";
 import { AIMetadataAssistant } from "./ai-metadata-assistant";
 import { MediaStager } from "./media-stager";
 import { YOUTUBE_CATEGORIES, YOUTUBE_PRIVACY_OPTIONS } from "@/constants/youtube";
 import { COMMON_TIMEZONES, getDefaultTimezone } from "@/lib/utils/timezone";
+import { supabase } from "@/lib/supabase/client";
 
 export function ContentComposer() {
   const router = useRouter();
@@ -41,6 +47,19 @@ export function ContentComposer() {
   // Scheduling State
   const [scheduleDate, setScheduleDate] = useState("");
   const [timezone, setTimezone] = useState(getDefaultTimezone());
+  const [autoPublish, setAutoPublish] = useState(true);
+  const [autoDeleteMedia, setAutoDeleteMedia] = useState(true);
+  const [userEmail, setUserEmail] = useState<string>("reachsurajyadav@gmail.com");
+
+  useEffect(() => {
+    async function loadCreatorEmail() {
+      const { data } = await supabase.auth.getUser();
+      if (data.user?.email) {
+        setUserEmail(data.user.email);
+      }
+    }
+    loadCreatorEmail();
+  }, []);
 
   // UI status
   const [isSaving, setIsSaving] = useState(false);
@@ -143,6 +162,7 @@ export function ContentComposer() {
 
       if (res.ok) {
         setSuccessMessage("Draft saved successfully to workspace!");
+        toast.success("Draft Saved", "Video draft saved to workspace.");
       }
     } finally {
       setIsSaving(false);
@@ -151,12 +171,12 @@ export function ContentComposer() {
 
   async function handleSchedule() {
     if (!scheduleDate) {
-      alert("Please select a target publish date and time.");
+      toast.warning("Missing Schedule Date", "Please select a target publish date and time.");
       return;
     }
 
     if (!title.trim()) {
-      alert("Please enter a video title before scheduling.");
+      toast.warning("Missing Video Title", "Please enter a video title before scheduling.");
       return;
     }
 
@@ -178,17 +198,21 @@ export function ContentComposer() {
           driveFileId: stagedMedia?.driveFileId,
           fileName: stagedMedia?.fileName,
           fileSize: stagedMedia?.fileSize,
+          autoPublish,
+          autoDeleteMedia,
+          notifyEmailTarget: userEmail,
         }),
       });
 
       if (res.ok) {
+        toast.success("Video Scheduled", `"${title.trim()}" successfully scheduled!`);
         router.push("/calendar");
       } else {
         const data = await res.json().catch(() => ({}));
-        alert(data.error?.message || "Failed to schedule video.");
+        toast.error("Scheduling Failed", data.error?.message || "Failed to schedule video.");
       }
     } catch {
-      alert("An unexpected error occurred while scheduling.");
+      toast.error("Network Error", "An unexpected error occurred while scheduling.");
     } finally {
       setIsSaving(false);
     }
@@ -374,15 +398,21 @@ export function ContentComposer() {
 
       {/* Schedule Settings */}
       <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5 space-y-4">
-        <h3 className="text-sm font-semibold text-zinc-100">Publishing Schedule</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+            <Calendar className="h-4 w-4 text-red-500" />
+            Publishing Schedule & Automation Rules
+          </h3>
+        </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-zinc-300">Target Publish Date & Time</label>
-            <Input
-              type="datetime-local"
+            <DateTimePicker
               value={scheduleDate}
-              onChange={(e) => setScheduleDate(e.target.value)}
+              onChange={setScheduleDate}
+              timezone={timezone}
+              placeholder="Click to pick release date & time..."
             />
           </div>
 
@@ -396,6 +426,81 @@ export function ContentComposer() {
               ))}
             </Select>
           </div>
+        </div>
+
+        {/* 2 User Options: Auto-Publish & Auto-Delete */}
+        <div className="pt-2 border-t border-zinc-800 space-y-3">
+          <span className="text-xs font-semibold text-zinc-200 block">
+            Schedule Execution Options:
+          </span>
+
+          {/* Option 1: Directly Publish */}
+          <label className="flex items-start gap-3 p-3.5 rounded-xl border border-zinc-800 bg-zinc-950/70 hover:bg-zinc-900/80 cursor-pointer transition-colors">
+            <input
+              type="checkbox"
+              checked={autoPublish}
+              onChange={(e) => setAutoPublish(e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-red-600 focus:ring-red-500"
+            />
+            <div className="text-xs space-y-0.5">
+              <span className="font-semibold text-zinc-100 flex items-center gap-1.5">
+                <Zap className="h-3.5 w-3.5 text-emerald-400" />
+                Directly publish and upload when scheduled time arrives
+              </span>
+              <p className="text-zinc-400 leading-relaxed text-[11px]">
+                {autoPublish
+                  ? "Active: When the scheduled time arrives, Creator Hub will automatically publish to YouTube without waiting for button clicks."
+                  : "Manual confirmation: System will wait for you to visit the site and press 'Publish Now' when scheduled time arrives."}
+              </p>
+            </div>
+          </label>
+
+          {/* Option 2: Directly Delete from Drive */}
+          <label className="flex items-start gap-3 p-3.5 rounded-xl border border-zinc-800 bg-zinc-950/70 hover:bg-zinc-900/80 cursor-pointer transition-colors">
+            <input
+              type="checkbox"
+              checked={autoDeleteMedia}
+              onChange={(e) => setAutoDeleteMedia(e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-red-600 focus:ring-red-500"
+            />
+            <div className="text-xs space-y-0.5">
+              <span className="font-semibold text-zinc-100 flex items-center gap-1.5">
+                <Trash2 className="h-3.5 w-3.5 text-rose-400" />
+                Directly delete temporarily staged media file from Google Drive
+              </span>
+              <p className="text-zinc-400 leading-relaxed text-[11px]">
+                {autoDeleteMedia
+                  ? "Active: The source video file will be permanently deleted from Google Drive immediately after YouTube upload confirmation."
+                  : "Manual cleanup: Staged file is retained in your Google Drive until you manually click 'Clean Drive File'."}
+              </p>
+            </div>
+          </label>
+
+          {/* Dynamic Email Notification Preview Notice */}
+          {autoPublish && autoDeleteMedia ? (
+            <div className="p-3 bg-emerald-950/20 border border-emerald-800/40 rounded-xl flex items-start gap-2.5 text-xs text-emerald-200">
+              <Mail className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+              <div className="text-[11px] leading-relaxed">
+                <strong>Post-Upload Confirmation Email:</strong> Both automation rules are enabled, so no pre-publish alert is needed. A confirmation email with your live YouTube link will be sent to{" "}
+                <strong className="text-emerald-100 font-mono">{userEmail}</strong> right after publication and Drive media purge.
+              </div>
+            </div>
+          ) : (
+            <div className="p-3 bg-amber-950/20 border border-amber-800/40 rounded-xl flex items-start gap-2.5 text-xs text-amber-200">
+              <Mail className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="text-[11px] leading-relaxed">
+                <strong>2-Minute Advance Action Required Alert:</strong> Because manual confirmation is enabled (
+                <strong className="text-amber-100">
+                  {!autoPublish && !autoDeleteMedia
+                    ? "Manual Publish & Manual Drive Cleanup"
+                    : !autoPublish
+                    ? "Manual Publish"
+                    : "Manual Drive Cleanup"}
+                </strong>
+                ), an email alert will be sent to <strong className="text-amber-100 font-mono">{userEmail}</strong> exactly 2 minutes before the time arrives so you can reach the site on time to click the action button.
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

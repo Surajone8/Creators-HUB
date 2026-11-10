@@ -10,6 +10,8 @@ export interface UploadResult {
   youtubeVideoId?: string;
   youtubeUrl?: string;
   driveFileDeleted?: boolean;
+  driveCleanupError?: string;
+  driveRequiresActivation?: boolean;
   error?: string;
   errorCode?: string;
 }
@@ -74,15 +76,19 @@ export class YouTubeUploadService {
    */
   async uploadDriveFileToYouTube({
     accessToken,
+    driveAccessToken,
     driveFileId,
     payload,
     fileSize,
+    autoDeleteMedia = true,
     onProgress,
   }: {
     accessToken: string;
+    driveAccessToken?: string;
     driveFileId: string;
     payload: YouTubeUploadPayload;
     fileSize: number;
+    autoDeleteMedia?: boolean;
     onProgress?: UploadProgressCallback;
   }): Promise<UploadResult> {
     try {
@@ -94,11 +100,13 @@ export class YouTubeUploadService {
         step: "Retrieving staged video from Google Drive...",
       });
 
+      const driveFetchToken = driveAccessToken || accessToken;
+
       // Attempt 1: Authenticated Google Drive API
       let driveMediaRes = await fetch(
         `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`,
         {
-          headers: { Authorization: `Bearer ${accessToken}` },
+          headers: { Authorization: `Bearer ${driveFetchToken}` },
         }
       );
 
@@ -197,9 +205,15 @@ export class YouTubeUploadService {
       });
 
       // Step 4: CRITICAL SAFEGUARD - Safe deletion only after verified YouTube success
-      // Section 5.1: "Delete the Drive file only after YouTube video ID is recorded"
-      const cleanupResult = await driveStagingClient.deleteFileFromDrive(driveFileId, accessToken);
-      const driveDeleted = cleanupResult.success;
+      // If user selected autoDeleteMedia = false, keep file in Drive and wait for user to click delete!
+      let driveDeleted = false;
+      let cleanupResult: any = { success: false };
+
+      if (autoDeleteMedia !== false) {
+        const cleanupToken = driveAccessToken || accessToken;
+        cleanupResult = await driveStagingClient.deleteFileFromDrive(driveFileId, cleanupToken);
+        driveDeleted = cleanupResult.success;
+      }
 
       onProgress?.({
         bytesUploaded: exactFileSize,
@@ -213,6 +227,8 @@ export class YouTubeUploadService {
         youtubeVideoId: videoId,
         youtubeUrl: `https://youtu.be/${videoId}`,
         driveFileDeleted: driveDeleted,
+        driveCleanupError: cleanupResult.error,
+        driveRequiresActivation: cleanupResult.requiresActivation,
       };
     } catch (err: unknown) {
       // Step 5: Safeguard on error - DO NOT delete the Drive file! Retain for recovery.

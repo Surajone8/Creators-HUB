@@ -16,6 +16,11 @@ export class ScheduleService {
         target_publish_time,
         display_timezone,
         schedule_state,
+        auto_publish,
+        auto_delete_media,
+        notify_email_sent,
+        notify_email_target,
+        post_publish_email_sent,
         created_at,
         content_posts (
           id,
@@ -60,6 +65,10 @@ export class ScheduleService {
       const status = item.schedule_state || platform?.publish_status || "scheduled";
       const visibility = platform?.visibility || "private";
       const hasMedia = !!(media?.google_drive_file_id || post?.media_asset_id);
+      const autoPublish = item.auto_publish !== false;
+      const autoDeleteMedia = item.auto_delete_media !== false;
+      const notifyEmailSent = item.notify_email_sent === true;
+      const notifyEmailTarget = item.notify_email_target || null;
 
       return {
         id: item.id,
@@ -77,8 +86,15 @@ export class ScheduleService {
         driveFileId: media?.google_drive_file_id || null,
         fileName: media?.file_name || null,
         fileSize: media?.file_size || null,
+        mediaCleanupStatus: media?.cleanup_status || (media?.google_drive_file_id ? "staged" : null),
+        mediaAssetId: media?.id || null,
         visibility,
         youtubeVideoId: platform?.youtube_video_id || null,
+        autoPublish,
+        autoDeleteMedia,
+        notifyEmailSent,
+        notifyEmailTarget,
+        postPublishEmailSent: item.post_publish_email_sent === true,
         createdAt: item.created_at,
       };
     });
@@ -157,6 +173,10 @@ export class ScheduleService {
     }
 
     // 4. Insert into content_schedules
+    const autoPublish = input.autoPublish !== false;
+    const autoDeleteMedia = input.autoDeleteMedia !== false;
+    const notifyEmailTarget = input.notifyEmailTarget || null;
+
     const { error: schedErr } = await supabase.from("content_schedules").insert({
       id: scheduleId,
       post_id: postId,
@@ -164,6 +184,10 @@ export class ScheduleService {
       target_publish_time: utcTime,
       display_timezone: input.displayTimezone || "UTC",
       schedule_state: "scheduled",
+      auto_publish: autoPublish,
+      auto_delete_media: autoDeleteMedia,
+      notify_email_sent: false,
+      notify_email_target: notifyEmailTarget,
       created_at: now,
       updated_at: now,
     });
@@ -207,6 +231,10 @@ export class ScheduleService {
       fileSize: input.fileSize || null,
       visibility: input.visibility || "private",
       youtubeVideoId: null,
+      autoPublish,
+      autoDeleteMedia,
+      notifyEmailSent: false,
+      notifyEmailTarget,
       createdAt: now,
     };
   }
@@ -256,18 +284,30 @@ export class ScheduleService {
     supabase: SupabaseClient,
     scheduleId: string,
     newTargetPublishTime: string,
-    displayTimezone?: string
+    displayTimezone?: string,
+    options?: { autoPublish?: boolean; autoDeleteMedia?: boolean }
   ): Promise<boolean> {
     const utcTime = normalizeToUTC(newTargetPublishTime, displayTimezone || "UTC");
 
+    const updatePayload: Record<string, any> = {
+      target_publish_time: utcTime,
+      display_timezone: displayTimezone || "UTC",
+      schedule_state: "scheduled",
+      notify_email_sent: false,
+      post_publish_email_sent: false,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (options?.autoPublish !== undefined) {
+      updatePayload.auto_publish = options.autoPublish;
+    }
+    if (options?.autoDeleteMedia !== undefined) {
+      updatePayload.auto_delete_media = options.autoDeleteMedia;
+    }
+
     const { error } = await supabase
       .from("content_schedules")
-      .update({
-        target_publish_time: utcTime,
-        display_timezone: displayTimezone || "UTC",
-        schedule_state: "scheduled",
-        updated_at: new Date().toISOString(),
-      })
+      .update(updatePayload)
       .eq("id", scheduleId);
 
     if (error) {
