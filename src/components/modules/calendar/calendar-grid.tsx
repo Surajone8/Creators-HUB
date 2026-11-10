@@ -108,46 +108,15 @@ export function CalendarGrid() {
     };
   }, [fetchSchedules]);
 
-  // High-precision automated background dispatcher polling (every 5 seconds)
+  // Periodic UI refresh to keep schedule status badges up to date
+  // Note: Automated upload and email dispatching is handled globally by PublishingHeartbeat in DashboardLayout
   useEffect(() => {
-    const interval = setInterval(async () => {
-      const now = new Date();
-      // Check 1: Has item due for publishing (targetPublishTime <= now)
-      const hasDueForPublish = events.some(
-        (e) => e.status === "scheduled" && new Date(e.targetPublishTime) <= now
-      );
-      // Check 2: Has item due for 2-minute advance email alert (targetPublishTime <= now + 2m15s, !notifyEmailSent, and requires manual action)
-      const hasDueForEmail = events.some(
-        (e) =>
-          e.status === "scheduled" &&
-          (!e.autoPublish || !e.autoDeleteMedia) &&
-          !e.notifyEmailSent &&
-          new Date(e.targetPublishTime).getTime() <= now.getTime() + 135000
-      );
-
-      if (hasDueForPublish || hasDueForEmail) {
-        try {
-          const res = await fetch("/api/publishing/dispatch", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-          });
-          const json = await res.json();
-          if (
-            json.success &&
-            ((json.data?.totalProcessed && json.data.totalProcessed > 0) ||
-              (json.data?.advanceReminderEmailsDispatched &&
-                json.data.advanceReminderEmailsDispatched > 0))
-          ) {
-            fetchSchedules();
-          }
-        } catch {
-          // Retry next tick
-        }
-      }
-    }, 5000);
+    const interval = setInterval(() => {
+      fetchSchedules();
+    }, 15000);
 
     return () => clearInterval(interval);
-  }, [events, fetchSchedules]);
+  }, [fetchSchedules]);
 
   // Calendar Grid Days Calculation
   const calendarDays = useMemo(() => {

@@ -20,6 +20,9 @@ export interface DispatchResultItem {
 }
 
 export class PublishingDispatcherService {
+  // In-memory mutex to prevent concurrent dispatches within the same process
+  private activeDispatches = new Set<string>();
+
   /**
    * Dispatches a specific schedule or all due schedules
    */
@@ -36,93 +39,181 @@ export class PublishingDispatcherService {
     refreshToken?: string | null;
     driveAccessToken?: string | null;
   }): Promise<DispatchResultItem> {
-    // 1. Fetch schedule and related post, platform, and media asset data
-    const { data: schedule, error: schedErr } = await supabase
-      .from("content_schedules")
-      .select(`
-        id,
-        target_publish_time,
-        schedule_state,
-        display_timezone,
-        auto_publish,
-        auto_delete_media,
-        notify_email_target,
-        notify_email_sent,
-        post_id,
-        post_platform_id,
-        content_posts (
-          id,
-          user_id,
-          title,
-          media_asset_id,
-          media_assets (
-            id,
-            google_drive_file_id,
-            file_name,
-            file_size
-          )
-        ),
-        content_post_platforms (
-          id,
-          title,
-          description,
-          tags,
-          category_id,
-          visibility,
-          publish_status
-        )
-      `)
-      .eq("id", scheduleId)
-      .single();
-
-    if (schedErr || !schedule) {
-      throw new Error(`Schedule not found: ${schedErr?.message || scheduleId}`);
-    }
-
-    const post = schedule.content_posts as any;
-    const platform = schedule.content_post_platforms as any;
-    const media = post?.media_assets as any;
-
-    if (!media?.google_drive_file_id) {
-      throw new Error("No Google Drive staged media file found for this schedule.");
-    }
-
-    const shouldAutoDeleteMedia = schedule.auto_delete_media !== false;
-
-    // 2. Fetch or create publishing_job
-    const { data: jobs } = await supabase
-      .from("publishing_jobs")
-      .select("*")
-      .eq("schedule_id", scheduleId);
-
-    let job: PublishingJob;
-    if (jobs && jobs.length > 0) {
-      job = jobs[0];
-    } else {
-      job = {
-        id: `job_${Date.now()}`,
-        schedule_id: scheduleId,
-        post_platform_id: schedule.post_platform_id,
-        state: "in_progress",
-        attempt_count: 0,
-        max_attempts: 3,
-        idempotency_key: `dispatch_${scheduleId}_${Date.now()}`,
-        reconciliation_token: null,
-        last_error: null,
-        started_at: new Date().toISOString(),
-        completed_at: null,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+    // 0. In-memory deduplication check
+    if (this.activeDispatches.has(scheduleId)) {
+      console.log(`[PublishingDispatcher] In-memory lock: Schedule ${scheduleId} is actively being processed. Skipping duplicate trigger.`);
+      return {
+        scheduleId,
+        jobId: "",
+        title: "",
+        success: false,
+        error: "Schedule is already being processed.",
       };
-      await supabase.from("publishing_jobs").insert(job);
     }
 
-    // Mark job in_progress
-    await supabase
-      .from("publishing_jobs")
-      .update({
-        state: "in_progress",
-        started_at: new Date().toISOString(),
+    this.activeDispatches.add(scheduleId);
+
+    try {
+      // 1. Fetch schedule and related post, platform, and media asset data
+      const { data: schedule, error: schedErr } = await supabase
+        .from("content_schedules")
+        .select(`
+          id,
+          target_publish_time,
+          schedule_state,
+          display_timezone,
+          auto_publish,
+          auto_delete_media,
+          notify_email_target,
+          notify_email_sent,
+          post_id,
+          post_platform_id,
+          content_posts (
+            id,
+            user_id,
+            title,
+            media_asset_id,
+            media_assets (
+              id,
+              google_drive_file_id,
+              file_name,
+              file_size
+            )
+          ),
+          content_post_platforms (
+            id,
+            title,
+            description,
+            tags,
+            category_id,
+            visibility,
+            publish_status
+          )
+        `)
+        .eq("id", scheduleId)
+        .single();
+
+      if (schedErr || !schedule) {
+        throw new Error(`Schedule not found: ${schedErr?.message || scheduleId}`);
+      }
+
+      const post = schedule.content_posts as any;
+      const platform = schedule.content_post_platforms as any;
+      const media = post?.media_assets as any;
+
+      // Check if already completed or publishing
+      if (schedule.schedule_state === "completed") {
+        console.log(`[PublishingDispatcher] Schedule ${scheduleId} is already completed. Skipping.`);
+        return {
+          scheduleId,
+          jobId: "",
+          title: platform?.title || post?.title || "",
+          success: true,
+        };
+      }
+
+      if (schedule.schedule_state === "publishing") {
+        console.log(`[PublishingDispatcher] Schedule ${scheduleId} is already in 'publishing' state. Skipping.`);
+        return {
+          scheduleId,
+          jobId: "",
+          title: platform?.title || post?.title || "",
+          success: false,
+          error: "Schedule is already actively uploading.",
+        };
+      }
+
+      if (platform?.publish_status === "published" || platform?.youtube_video_id) {
+        console.log(`[PublishingDispatcher] Post platform ${platform?.id} already published with YouTube video ${platform?.youtube_video_id}. Marking completed.`);
+        await supabase
+          .from("content_schedules")
+          .update({ schedule_state: "completed", updated_at: new Date().toISOString() })
+          .eq("id", scheduleId);
+        return {
+          scheduleId,
+          jobId: "",
+          title: platform?.title || post?.title || "",
+          success: true,
+          youtubeVideoId: platform?.youtube_video_id,
+        };
+      }
+
+      // Optimistic concurrency lock: ATOMICALLY claim the schedule from 'scheduled' -> 'publishing'
+      const { data: claimedSchedule, error: claimErr } = await supabase
+        .from("content_schedules")
+        .update({
+          schedule_state: "publishing",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", scheduleId)
+        .eq("schedule_state", "scheduled")
+        .select("id");
+
+      if (claimErr || !claimedSchedule || claimedSchedule.length === 0) {
+        console.log(`[PublishingDispatcher] Atomic Lock: Schedule ${scheduleId} was already claimed by another concurrent worker. Skipping.`);
+        return {
+          scheduleId,
+          jobId: "",
+          title: platform?.title || post?.title || "",
+          success: false,
+          error: "Schedule was already claimed by a concurrent worker.",
+        };
+      }
+
+      if (!media?.google_drive_file_id) {
+        // Revert lock on validation failure
+        await supabase
+          .from("content_schedules")
+          .update({ schedule_state: "failed", updated_at: new Date().toISOString() })
+          .eq("id", scheduleId);
+        throw new Error("No Google Drive staged media file found for this schedule.");
+      }
+
+      const shouldAutoDeleteMedia = schedule.auto_delete_media !== false;
+
+      // 2. Fetch or create publishing_job
+      const { data: jobs } = await supabase
+        .from("publishing_jobs")
+        .select("*")
+        .eq("schedule_id", scheduleId);
+
+      let job: PublishingJob;
+      if (jobs && jobs.length > 0) {
+        job = jobs[0];
+        if (job.state === "succeeded") {
+          console.log(`[PublishingDispatcher] Job ${job.id} already succeeded. Skipping.`);
+          return {
+            scheduleId,
+            jobId: job.id,
+            title: platform.title || post.title,
+            success: true,
+          };
+        }
+      } else {
+        job = {
+          id: `job_${Date.now()}`,
+          schedule_id: scheduleId,
+          post_platform_id: schedule.post_platform_id,
+          state: "in_progress",
+          attempt_count: 0,
+          max_attempts: 3,
+          idempotency_key: `dispatch_${scheduleId}_${Date.now()}`,
+          reconciliation_token: null,
+          last_error: null,
+          started_at: new Date().toISOString(),
+          completed_at: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        await supabase.from("publishing_jobs").insert(job);
+      }
+
+      // Mark job in_progress
+      await supabase
+        .from("publishing_jobs")
+        .update({
+          state: "in_progress",
+          started_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
       .eq("id", job.id);
@@ -313,6 +404,14 @@ export class PublishingDispatcherService {
         .eq("id", job.id);
 
       await supabase
+        .from("content_schedules")
+        .update({
+          schedule_state: "failed",
+          updated_at: now,
+        })
+        .eq("id", scheduleId);
+
+      await supabase
         .from("content_post_platforms")
         .update({
           publish_status: "failed",
@@ -328,7 +427,34 @@ export class PublishingDispatcherService {
         error: uploadResult.error || "Publishing pipeline encountered an error",
       };
     }
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : "Dispatch execution failed";
+    console.error(`[PublishingDispatcher] Dispatch execution failed for schedule ${scheduleId}:`, err);
+
+    try {
+      await supabase
+        .from("content_schedules")
+        .update({
+          schedule_state: "failed",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", scheduleId)
+        .eq("schedule_state", "publishing");
+    } catch {
+      // Ignore fallback cleanup error
+    }
+
+    return {
+      scheduleId,
+      jobId: "",
+      title: "",
+      success: false,
+      error: errorMsg,
+    };
+  } finally {
+    this.activeDispatches.delete(scheduleId);
   }
+}
 
   /**
    * Finds all scheduled jobs whose scheduled publish time <= now.
